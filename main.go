@@ -1,83 +1,161 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
-	"net/url"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
+	"time"
+
+	"golang.org/x/net/netutil"
+	"golang.org/x/sync/errgroup"
 )
 
-var wg sync.WaitGroup
-
-func checkUrl(address string, ch chan bool) {
-
-	_, err := url.Parse(address)
-	if err != nil {
-		ch <- true
-	}
-
-	resp, err := http.Get(address)
-	if err != nil {
-		log.Println(err)
-	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalf("Error fetching url %s: %v", address, err)
-	}
-	log.Println(string(body))
-	wg.Done()
-
+type Url struct {
+	Seq []string
 }
 
-// /["https://api.chucknorris.io/jokes/random", "https://jsonplaceholder.typicode.com/users"] rested
-func main() {
-	//todo: realize func, hadnle by ropute, []url,
-	//check http.Get, if 1 url broken, send error
-	//else -> download resource
-	type T struct {
-		Urls []string
-	}
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	var errG errgroup.Group
+	// ctx, cancel := context.WithCancel(context.Background())
+	if r.Method == "POST" {
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
-			reqBody, err := ioutil.ReadAll(r.Body)
-			if err != nil {
-				log.Println("Error reading", err)
-			}
-			u := T{}
-			json.Unmarshal(reqBody, &u.Urls)
-
-			wg.Add(len(u.Urls))
-
-			ch := make(chan bool)
-
-			for i := 0; i < len(u.Urls); i++ {
-				go checkUrl(u.Urls[i], ch)
-				if status := <-ch; !status {
-					//return client -> error message
-					log.Println("Error url")
-				}
-			}
-			wg.Wait()
+		reqBody, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Println("Error reading", err)
 		}
-	})
-	http.ListenAndServe(":6969", nil)
-	log.Println("start server..")
+		u := Url{}
+		json.Unmarshal(reqBody, &u.Seq)
+
+		if len(u.Seq) <= 20 {
+			//check valid urls
+			for i := 0; i < len(u.Seq); i++ {
+				url := u.Seq[i]
+				errG.Go(func() error {
+					return func(address string) error {
+						resp, err := http.Get(address)
+						if err != nil {
+							return err
+						}
+						defer resp.Body.Close()
+						return nil
+					}(url)
+				})
+			}
+			//if err, stop gorutine
+			if err := errG.Wait(); err != nil {
+				w.Write([]byte(err.Error())) //send erro client
+				return
+			}
+			//if Seq ok, get data
+
+			count := 0
+			temp := 0
+
+			if len(u.Seq) > 4 {
+				for i := 1; i < len(u.Seq); i++ {
+					if i%4 == 0 {
+						count++
+					} else {
+						temp = i % 4 //last num
+					}
+				}
+			} else {
+				count = 1
+			}
+			//add count wg call
+			if temp != 0 { //
+				count += 1
+			}
+			log.Println(count, len(u.Seq), u.Seq, "lenn")
+			//1 time - 4 request goroutines
+
+			wg := sync.WaitGroup{}
+			wg.Add(count) //set group count
+
+			// for i := 0; i < count; i++ {
+			pos := 0
+
+			go func() { //1 time call go
+				// ctx := context.Background()
+				// x, _ := context.WithTimeout(ctx, time.Second*1)
+				var wg2 sync.WaitGroup
+				wg2.Add(4)
+				//save last index
+				for j := pos; j < pos+4; j++ {
+					go func(url string) {
+						if url != "" {
+							customClient := http.Client{
+								Timeout: time.Second * 1,
+							}
+							resp, err := customClient.Get(url)
+							if err != nil {
+								log.Println(err)
+							}
+							defer resp.Body.Close()
+
+							body, err := ioutil.ReadAll(resp.Body)
+							if err != nil {
+								log.Println(err)
+							}
+							w.Write(body)
+							log.Println("done wg2")
+						}
+						wg2.Done() //done -> inside
+
+					}(u.Seq[j]) // 0,1,2,3, - 4,5,6,7..
+				}
+				pos += 4
+				wg2.Wait() //done wg2
+				wg.Done()  //outWg-1
+				log.Println("done wg1")
+			}()
+			wg.Wait()
+			log.Println("after")
+		}
+	}
 }
+func main() {
 
-// приложение представляет собой http-сервер с одним хендлером+
-// хендлер на вход получает POST-запрос со списком url в json-формате+
-// сервер запрашивает данные по всем этим url и возвращает результат клиенту в json-формате+
-// если в процессе обработки хотя бы одного из url получена ошибка, обработка всего списка прекращается и клиенту возвращается текстовая ошибка Ограничения:+
+	router := http.NewServeMux()
+	router.HandleFunc("/", handleRequest)
 
-// использовать можно только компоненты стандартной библиотеки Go
-// сервер не принимает запрос если количество url в в нем больше 20
-// сервер не обслуживает больше чем 100 одновременных входящих http-запросов
-// для каждого входящего запроса должно быть не больше 4 одновременных исходящих
-// таймаут на запрос одного url - секунда
-// обработка запроса может быть отменена клиентом в любой момент, это должно повлечь за собой остановку всех операций связанных с этим запросом
-// сервис должен поддерживать 'graceful shutdown'
-// результат должен быть выложен на github
+	srv := http.Server{
+		WriteTimeout: time.Second * 5,
+		ReadTimeout:  time.Second * 5,
+		Handler:      router,
+	}
+
+	listener, err := net.Listen("tcp", ":6969")
+	if err != nil {
+		log.Fatal(err)
+	}
+	//set maxConn
+	listener = netutil.LimitListener(listener, 100)
+	defer listener.Close()
+
+	go func() {
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	//register signal handler
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	//wait for signal
+	<-c
+	log.Printf("interrupted, shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5) //set 5 sec, child proccess end
+	defer cancel()
+	//server shutdown
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("graceful shutdown failed: %v\n", err)
+	}
+}
