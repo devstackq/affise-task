@@ -50,77 +50,37 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			//if err, stop gorutine
 			if err := errG.Wait(); err != nil {
-				w.Write([]byte(err.Error())) //send erro client
+				w.Write([]byte(err.Error()))
 				return
 			}
-			//if Seq ok, get data
-
-			count := 0
-			temp := 0
-
-			if len(u.Seq) > 4 {
-				for i := 1; i < len(u.Seq); i++ {
-					if i%4 == 0 {
-						count++
-					} else {
-						temp = i % 4 //last num
-					}
-				}
-			} else {
-				count = 1
-			}
-			//add count wg call
-			if temp != 0 { //
-				count += 1
-			}
-			log.Println(count, len(u.Seq), u.Seq, "lenn")
-			//1 time - 4 request goroutines
 
 			wg := sync.WaitGroup{}
-			wg.Add(count) //set group count
+			wg.Add(len(u.Seq)) //set group count
 
-			// for i := 0; i < count; i++ {
-			pos := 0
+			for j := 0; j < len(u.Seq); j++ {
+				go func(url string) {
+					customClient := http.Client{
+						Timeout: time.Second * 1,
+					}
+					resp, err := customClient.Get(url)
+					if err != nil {
+						log.Println(err)
+					}
+					defer resp.Body.Close()
 
-			go func() { //1 time call go
-				// ctx := context.Background()
-				// x, _ := context.WithTimeout(ctx, time.Second*1)
-				var wg2 sync.WaitGroup
-				wg2.Add(4)
-				//save last index
-				for j := pos; j < pos+4; j++ {
-					go func(url string) {
-						if url != "" {
-							customClient := http.Client{
-								Timeout: time.Second * 1,
-							}
-							resp, err := customClient.Get(url)
-							if err != nil {
-								log.Println(err)
-							}
-							defer resp.Body.Close()
-
-							body, err := ioutil.ReadAll(resp.Body)
-							if err != nil {
-								log.Println(err)
-							}
-							w.Write(body)
-							log.Println("done wg2")
-						}
-						wg2.Done() //done -> inside
-
-					}(u.Seq[j]) // 0,1,2,3, - 4,5,6,7..
-				}
-				pos += 4
-				wg2.Wait() //done wg2
-				wg.Done()  //outWg-1
-				log.Println("done wg1")
-			}()
+					body, err := ioutil.ReadAll(resp.Body)
+					if err != nil {
+						log.Println(err)
+					}
+					w.Write(body)
+					wg.Done()
+				}(u.Seq[j])
+			}
 			wg.Wait()
-			log.Println("after")
 		}
 	}
 }
+
 func main() {
 
 	router := http.NewServeMux()
